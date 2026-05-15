@@ -1,2 +1,4 @@
 *.json
 example_client.py
+# Ignore all pycache
+net/__pycache__
