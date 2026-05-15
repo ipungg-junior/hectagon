@@ -1,7 +1,6 @@
 import asyncio
 import json
-from net._tcp_server import TCPServer
-from net._net_manager import ConnectionManager
+from net._core import HectagonServer
 from net._router import PacketRouter
 from extras._handler import PingPoolingHandler, RegisterHandler
 
@@ -14,17 +13,12 @@ async def main():
     host = tcp_config["server_ip"]
     port = tcp_config["server_port"]
 
+    # Register handlers
     PacketRouter.register("register", RegisterHandler())
     PacketRouter.register("ping", PingPoolingHandler())
 
-    connection_manager = ConnectionManager()
-
-    server = TCPServer(
-        host=host,
-        port=port,
-        connection_manager=connection_manager
-    )
-
+    # Create and start server
+    server = HectagonServer(host=host, port=port)
     await server.start()
 
 
