@@ -1,21 +1,22 @@
 import json
 import asyncio
 from net._router import PacketRouter
+from net._net_manager import get_manager
+
 
 class ClientSession:
 
-    def __init__(self, reader, writer, connection_manager):
+    def __init__(self, reader, writer):
         self.reader = reader
         self.writer = writer
-        self.connection_manager = connection_manager
+        self.manager = get_manager()
         self.id = None
         self.is_connected = True
         self.registered = False
-        self.remote_addr = None
 
     async def start(self):
         addr = self.writer.get_extra_info("peername")
-        self.remote_addr = addr
+        print(f"[ClientSession] New connection from {addr}")
 
         try:
             while self.is_connected:
@@ -55,11 +56,9 @@ class ClientSession:
         else:
             print(f"[{addr}] Packet received before registration, ignoring")
             await self.send({
-                "type": "register_response",
-                "status": "failed",
+                "type": "error",
                 "message": "Must register first"
             })
-            await self.disconnect()
 
     async def handle_packet(self, packet):
         """Route registered client packets to handlers"""
@@ -75,17 +74,18 @@ class ClientSession:
             await self.writer.drain()
         except (ConnectionResetError, BrokenPipeError):
             self.is_connected = False
-            await self.connection_manager.remove(self)
+            if self.id:
+                await self.manager.remove(self.id)
         except Exception as e:
             print(f"[{self.writer.get_extra_info('peername')}] Send error: {e}")
             self.is_connected = False
 
     async def disconnect(self):
         self.is_connected = False
+        if self.id:
+            await self.manager.remove(self.id)
         try:
-            await self.connection_manager.remove(self)
             self.writer.close()
             await self.writer.wait_closed()
-            print(f'Remove {self.id} from client_pool')
         except Exception as e:
             print(f"Error closing connection: {e}")
