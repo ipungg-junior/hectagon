@@ -1,4 +1,9 @@
 *.json
 example_client.py
+example_client_one.py
+example_client_two.py
+example_client_four.py
+client_with_prompt.py
 # Ignore all pycache
 net/__pycache__
+extras/__pycache__

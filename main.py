@@ -2,6 +2,8 @@ import asyncio
 import json
 from net._tcp_server import TCPServer
 from net._net_manager import ConnectionManager
+from net._router import PacketRouter
+from extras._handler import PingPoolingHandler, RegisterHandler
 
 
 async def main():
@@ -11,6 +13,9 @@ async def main():
     tcp_config = config["net"]["tcp_server"]
     host = tcp_config["server_ip"]
     port = tcp_config["server_port"]
+
+    PacketRouter.register("register", RegisterHandler())
+    PacketRouter.register("ping", PingPoolingHandler())
 
     connection_manager = ConnectionManager()
 

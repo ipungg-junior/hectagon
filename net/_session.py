@@ -1,5 +1,6 @@
 import json
 import asyncio
+from net._router import PacketRouter
 
 class ClientSession:
 
@@ -9,10 +10,13 @@ class ClientSession:
         self.connection_manager = connection_manager
         self.id = None
         self.is_connected = True
+        self.registered = False
+        self.remote_addr = None
 
     async def start(self):
         addr = self.writer.get_extra_info("peername")
-        await self.connection_manager.add(self)
+        self.remote_addr = addr
+
         try:
             while self.is_connected:
                 try:
@@ -27,7 +31,12 @@ class ClientSession:
 
                 try:
                     packet = json.loads(data.decode())
-                    await self.handle_packet(packet)
+
+                    if not self.registered:
+                        await self.handle_registration(packet, addr)
+                    else:
+                        await self.handle_packet(packet)
+
                 except json.JSONDecodeError:
                     print(f"[{addr}] Invalid JSON received")
         except ConnectionResetError:
@@ -39,8 +48,22 @@ class ClientSession:
         finally:
             await self.disconnect()
 
+    async def handle_registration(self, packet, addr):
+        """Handle registration before routing to handlers"""
+        if packet.get("type") == "register":
+            await PacketRouter.handle(self, packet)
+        else:
+            print(f"[{addr}] Packet received before registration, ignoring")
+            await self.send({
+                "type": "register_response",
+                "status": "failed",
+                "message": "Must register first"
+            })
+            await self.disconnect()
+
     async def handle_packet(self, packet):
-        print(packet)
+        """Route registered client packets to handlers"""
+        await PacketRouter.handle(self, packet)
 
     async def send(self, data):
         if not self.is_connected:
@@ -59,9 +82,10 @@ class ClientSession:
 
     async def disconnect(self):
         self.is_connected = False
-        await self.connection_manager.remove(self)
         try:
+            await self.connection_manager.remove(self)
             self.writer.close()
             await self.writer.wait_closed()
+            print(f'Remove {self.id} from client_pool')
         except Exception as e:
             print(f"Error closing connection: {e}")
