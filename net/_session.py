@@ -89,3 +89,71 @@ class ClientSession:
             await self.writer.wait_closed()
         except Exception as e:
             print(f"Error closing connection: {e}")
+
+
+class HectagonIPCSession:
+    """Represents one local IPC client connection (via UNIX socket)"""
+
+    def __init__(self, reader, writer, client_layer):
+        self.reader = reader
+        self.writer = writer
+        self.client_layer = client_layer
+        self.is_connected = True
+
+    async def start(self):
+        """Main loop for IPC session"""
+        try:
+            while self.is_connected:
+                try:
+                    data = await asyncio.wait_for(self.reader.readline(), timeout=60)
+                except asyncio.TimeoutError:
+                    print("[HectagonIPCSession] Timeout")
+                    break
+
+                if not data:
+                    print("[HectagonIPCSession] Local client disconnected")
+                    break
+
+                try:
+                    packet = json.loads(data.decode())
+                    await self.handle_packet(packet)
+                except json.JSONDecodeError:
+                    print("[HectagonIPCSession] Invalid JSON")
+
+        except Exception as e:
+            print(f"[HectagonIPCSession] Error: {e}")
+        finally:
+            await self.disconnect()
+
+    async def handle_packet(self, packet):
+        """Handle incoming packet from local app"""
+        packet_id = packet.get("id")
+
+        # Send to TCP server
+        await self.client_layer.send_to_server(packet)
+
+        # Store for response routing if it's a request
+        if packet_id:
+            self.client_layer.pending_requests[packet_id] = self
+
+    async def send(self, data):
+        """Send JSON packet to local app"""
+        if not self.is_connected:
+            return
+
+        try:
+            payload = json.dumps(data) + "\n"
+            self.writer.write(payload.encode())
+            await self.writer.drain()
+        except Exception as e:
+            print(f"[HectagonIPCSession] Send error: {e}")
+            self.is_connected = False
+
+    async def disconnect(self):
+        """Cleanup IPC session"""
+        self.is_connected = False
+        try:
+            self.writer.close()
+            await self.writer.wait_closed()
+        except Exception as e:
+            print(f"[HectagonIPCSession] Close error: {e}")
