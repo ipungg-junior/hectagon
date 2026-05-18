@@ -1,17 +1,25 @@
+"""
+Core Hectagon Architecture:
+- HectagonServer: Centralized TCP server
+- HectagonClient: Daemon managing TCP connection + UNIX socket for tenants
+- HectaSession: TCP session between HectagonServer and HectagonClient
+"""
 import asyncio
 import json
 import os
-from net._session import ClientSession, HectagonIPCSession
+from net._session import HectaSession, TenantSession
+from net._net_manager import get_manager
 
 # UNIX socket path
-IPC_SOCKET_PATH = "/tmp/hectagon.sock"
+TENANT_SOCKET_PATH = "/tmp/hectagon.sock"
 
 # Cleanup socket on startup
-if os.path.exists(IPC_SOCKET_PATH):
-    os.remove(IPC_SOCKET_PATH)
+if os.path.exists(TENANT_SOCKET_PATH):
+    os.remove(TENANT_SOCKET_PATH)
 
 
 class HectagonServer:
+    """Centralized TCP server managing HectaSession connections"""
 
     def __init__(self, host, port):
         self.host = host
@@ -29,99 +37,127 @@ class HectagonServer:
             await server.serve_forever()
 
     async def handle_client(self, reader, writer):
-        session = ClientSession(reader, writer)
-        await session.start()
+        """Handle HectagonClient connection"""
+        connection_manager = get_manager()
+        hecta_session = HectaSession(reader, writer, connection_manager)
+        await self.receive_loop(hecta_session)
+
+    async def receive_loop(self, hecta_session):
+        """Receive packets from HectagonClient"""
+        while hecta_session.is_connected:
+            try:
+                data = await asyncio.wait_for(
+                    hecta_session.reader.readline(),
+                    timeout=30
+                )
+            except asyncio.TimeoutError:
+                print("[HectagonServer] HectaSession timeout")
+                break
+            except Exception as e:
+                print(f"[HectagonServer] Error: {e}")
+                break
+
+            if not data:
+                print("[HectagonServer] HectaSession disconnected")
+                break
+
+            try:
+                packet = json.loads(data.decode())
+                print(f"[HectagonServer] Received from tenant: {packet}")
+                # Handle packet (route to handler)
+            except json.JSONDecodeError:
+                print("[HectagonServer] Invalid JSON")
+
+        await hecta_session.close()
 
 
-class HectagonIPC:
-    """Local UNIX domain socket IPC server"""
+class TenantRegistry:
+    """Manages UNIX socket connections for tenants"""
 
-    def __init__(self, client_layer):
-        self.client_layer = client_layer
-        self.sessions = {}
-        self.session_counter = 0
+    def __init__(self, hectagon_client):
+        self.hectagon_client = hectagon_client
+        self.tenant_counter = 0
 
     async def start(self):
-        """Start UNIX socket server"""
+        """Start UNIX socket server for tenants"""
         server = await asyncio.start_unix_server(
-            self.handle_client,
-            IPC_SOCKET_PATH
+            self.handle_tenant,
+            TENANT_SOCKET_PATH
         )
 
-        print(f"[HectagonIPC] Listening on {IPC_SOCKET_PATH}")
+        print(f"[TenantRegistry] Listening on {TENANT_SOCKET_PATH}")
         async with server:
             await server.serve_forever()
 
-    async def handle_client(self, reader, writer):
-        """Handle new local app connection"""
-        session_id = self.session_counter
-        self.session_counter += 1
+    async def handle_tenant(self, reader, writer):
+        """Handle new tenant connection"""
+        # Generate unique tenant_id
+        self.tenant_counter += 1
+        tenant_id = f"tenant_{self.tenant_counter}"
 
-        session = HectagonIPCSession(reader, writer, self.client_layer)
-        self.sessions[session_id] = session
+        tenant_session = TenantSession(reader, writer, tenant_id, self.hectagon_client)
 
         try:
-            await session.start()
+            await tenant_session.start()
         finally:
-            if session_id in self.sessions:
-                del self.sessions[session_id]
-
-    async def broadcast_to_ipc(self, data):
-        """Broadcast packet to all IPC clients"""
-        for session in list(self.sessions.values()):
-            await session.send(data)
+            connection_manager = get_manager()
+            await connection_manager.remove(tenant_id)
 
 
 class HectagonClient:
-    """Client layer: TCP connection manager + UNIX socket IPC bridge"""
+    """
+    Client daemon:
+    - Maintains persistent TCP connection to HectagonServer (HectaSession)
+    - Provides UNIX socket for tenants (TenantRegistry)
+    - Bridges packet routing between TCP and UNIX socket
+    """
 
     def __init__(self, server_host, server_port):
         self.server_host = server_host
         self.server_port = server_port
 
-        # TCP connection state
-        self.reader = None
-        self.writer = None
+        # TCP connection state (HectaSession)
+        self.hecta_reader = None
+        self.hecta_writer = None
         self.is_connected = False
 
-        # IPC state
-        self.ipc = HectagonIPC(self)
-        self.pending_requests = {}  # Map request ID to IPCSession
+        # Tenant management
+        self.tenant_registry = TenantRegistry(self)
+        self.pending_requests = {}  # request_id → TenantSession
 
         # Reconnect config
-        self.reconnect_interval = 7  # seconds
+        self.reconnect_interval = 7
 
     async def start(self):
-        """Start client layer"""
+        """Start client daemon"""
         print("[HectagonClient] Starting...")
 
-        # Start IPC server
-        ipc_task = asyncio.create_task(self.ipc.start())
+        # Start UNIX socket for tenants
+        tenant_task = asyncio.create_task(self.tenant_registry.start())
 
-        # Start TCP connection manager
+        # Start TCP connection to server
         tcp_task = asyncio.create_task(self.maintain_tcp_connection())
 
-        # Wait for both (they run indefinitely)
-        await asyncio.gather(ipc_task, tcp_task)
+        # Run both concurrently
+        await asyncio.gather(tenant_task, tcp_task)
 
     async def maintain_tcp_connection(self):
-        """Maintain persistent TCP connection with auto-reconnect"""
+        """Maintain persistent TCP connection to server"""
         while True:
             try:
                 await self.connect_to_server()
-                await self.tcp_receive_loop()
+                await self.receive_from_server()
             except Exception as e:
                 print(f"[HectagonClient] Error: {e}")
 
-            # Reconnect after 7 seconds
             print(f"[HectagonClient] Reconnecting in {self.reconnect_interval}s...")
             await asyncio.sleep(self.reconnect_interval)
 
     async def connect_to_server(self):
-        """Connect to Hectagon server"""
+        """Connect to HectagonServer"""
         print(f"[HectagonClient] Connecting to {self.server_host}:{self.server_port}...")
 
-        self.reader, self.writer = await asyncio.open_connection(
+        self.hecta_reader, self.hecta_writer = await asyncio.open_connection(
             self.server_host,
             self.server_port
         )
@@ -129,25 +165,19 @@ class HectagonClient:
         self.is_connected = True
         print("[HectagonClient] Connected to server")
 
-        # Send register packet
-        await self.send_to_server({
-            "type": "register",
-            "request_id": "hectagon_client"
-        })
-
-    async def tcp_receive_loop(self):
-        """Receive packets from TCP server"""
+    async def receive_from_server(self):
+        """Receive packets from server"""
         while self.is_connected:
             try:
                 data = await asyncio.wait_for(
-                    self.reader.readline(),
+                    self.hecta_reader.readline(),
                     timeout=30
                 )
             except asyncio.TimeoutError:
-                print("[HectagonClient] TCP timeout")
+                print("[HectagonClient] Server timeout")
                 break
             except Exception as e:
-                print(f"[HectagonClient] TCP error: {e}")
+                print(f"[HectagonClient] Receive error: {e}")
                 break
 
             if not data:
@@ -156,60 +186,59 @@ class HectagonClient:
 
             try:
                 packet = json.loads(data.decode())
-                await self.handle_server_packet(packet)
+                await self.route_to_tenant(packet)
             except json.JSONDecodeError:
                 print("[HectagonClient] Invalid JSON from server")
 
         self.is_connected = False
-        await self.cleanup_tcp()
+        await self.close_tcp()
 
-    async def handle_server_packet(self, packet):
-        """Handle packet from server"""
-        packet_type = packet.get("type")
+    async def route_to_tenant(self, packet):
+        """Route server packet to tenant"""
+        tenant_id = packet.get("tenant_id")
+        request_id = packet.get("reply_to")
 
-        if packet_type == "register_response":
-            print("[HectagonClient] Registered with server")
-            return
-
-        # Check if it's a response to a previous request
-        reply_to = packet.get("reply_to")
-        if reply_to and reply_to in self.pending_requests:
-            # Route back to specific IPC client
-            ipc_session = self.pending_requests.pop(reply_to)
-            await ipc_session.send(packet)
+        if request_id and request_id in self.pending_requests:
+            # Route to specific tenant
+            tenant = self.pending_requests.pop(request_id)
+            await tenant.send(packet)
+        elif tenant_id:
+            # Route to specific tenant by ID
+            connection_manager = get_manager()
+            await connection_manager.send_to_tenant(tenant_id, packet)
         else:
-            # Broadcast to all IPC clients
-            await self.ipc.broadcast_to_ipc(packet)
+            # Broadcast to all tenants
+            connection_manager = get_manager()
+            await connection_manager.broadcast_to_tenants(packet)
 
-    async def send_to_server(self, data):
-        """Send packet to TCP server"""
-        if not self.is_connected or not self.writer:
+    async def send_to_server(self, packet):
+        """Send packet from tenant to server"""
+        if not self.is_connected or not self.hecta_writer:
             print("[HectagonClient] Not connected to server")
             return
 
         try:
-            payload = json.dumps(data) + "\n"
-            self.writer.write(payload.encode())
-            await self.writer.drain()
+            payload = json.dumps(packet) + "\n"
+            self.hecta_writer.write(payload.encode())
+            await self.hecta_writer.drain()
         except Exception as e:
             print(f"[HectagonClient] Send error: {e}")
             self.is_connected = False
 
-    async def cleanup_tcp(self):
-        """Cleanup TCP connection"""
-        if self.writer:
+    async def close_tcp(self):
+        """Close TCP connection to server"""
+        if self.hecta_writer:
             try:
-                self.writer.close()
-                await self.writer.wait_closed()
+                self.hecta_writer.close()
+                await self.hecta_writer.wait_closed()
             except Exception as e:
-                print(f"[HectagonClient] Cleanup error: {e}")
+                print(f"[HectagonClient] Close error: {e}")
 
-        self.reader = None
-        self.writer = None
+        self.hecta_reader = None
+        self.hecta_writer = None
         self.is_connected = False
 
 
 def get_hectagon_client(server_host="127.0.0.1", server_port=9000):
-    """Get HectagonClient instance"""
+    """Create HectagonClient instance"""
     return HectagonClient(server_host, server_port)
-        

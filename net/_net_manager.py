@@ -1,37 +1,47 @@
+"""
+ConnectionManager - Manages tenant sessions at UNIX socket layer
+Maps tenant_id → TenantSession for local UNIX socket connections
+"""
+
+
 class ConnectionManager:
+    """
+    Manages all tenant sessions connected via UNIX socket to HectagonClient.
+    One ConnectionManager per HectagonClient daemon.
+    """
 
     def __init__(self):
-        self.clients = {}
+        self.tenants = {}  # tenant_id → TenantSession
 
-    async def register(self, client_id, session):
-        """Register authenticated client"""
-        self.clients[client_id] = session
-        print(f"[ConnectionManager] Registered: {client_id} ({len(self.clients)} clients)")
+    async def register(self, tenant_id, tenant_session):
+        """Register new tenant"""
+        self.tenants[tenant_id] = tenant_session
+        print(f"[ConnectionManager] Tenant registered: {tenant_id} ({len(self.tenants)} total)")
 
-    async def remove(self, client_id):
-        """Remove client on disconnect"""
-        if client_id in self.clients:
-            del self.clients[client_id]
-            print(f"[ConnectionManager] Disconnected: {client_id} ({len(self.clients)} clients)")
+    async def remove(self, tenant_id):
+        """Remove tenant on disconnect"""
+        if tenant_id in self.tenants:
+            del self.tenants[tenant_id]
+            print(f"[ConnectionManager] Tenant disconnected: {tenant_id} ({len(self.tenants)} total)")
 
-    async def send_to_client(self, client_id, data):
-        """Send to specific client"""
-        session = self.clients.get(client_id)
-        if session:
-            await session.send(data)
+    async def send_to_tenant(self, tenant_id, data):
+        """Send packet to specific tenant"""
+        tenant = self.tenants.get(tenant_id)
+        if tenant:
+            await tenant.send(data)
 
-    async def broadcast(self, data):
-        """Send to all registered clients"""
-        for session in self.clients.values():
-            await session.send(data)
+    async def broadcast_to_tenants(self, data):
+        """Broadcast packet to all connected tenants"""
+        for tenant in list(self.tenants.values()):
+            await tenant.send(data)
 
-    def get_client(self, client_id):
-        """Get session by client ID"""
-        return self.clients.get(client_id)
+    def get_tenant(self, tenant_id):
+        """Get tenant session by ID"""
+        return self.tenants.get(tenant_id)
 
-    def is_registered(self, client_id):
-        """Check if client is registered"""
-        return client_id in self.clients
+    def is_tenant_connected(self, tenant_id):
+        """Check if tenant is connected"""
+        return tenant_id in self.tenants
 
 
 # Module-level singleton instance

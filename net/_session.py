@@ -1,70 +1,24 @@
+"""
+HectaSession - Manages TCP session between HectagonServer and HectagonClient
+"""
 import json
 import asyncio
-from net._router import PacketRouter
-from net._net_manager import get_manager
 
 
-class ClientSession:
+class HectaSession:
+    """
+    TCP session between HectagonServer and HectagonClient.
+    Handles persistent connection and packet transmission.
+    """
 
-    def __init__(self, reader, writer):
+    def __init__(self, reader, writer, connection_manager):
         self.reader = reader
         self.writer = writer
-        self.manager = get_manager()
-        self.id = None
+        self.connection_manager = connection_manager
         self.is_connected = True
-        self.registered = False
-
-    async def start(self):
-        addr = self.writer.get_extra_info("peername")
-        print(f"[ClientSession] New connection from {addr}")
-
-        try:
-            while self.is_connected:
-                try:
-                    data = await asyncio.wait_for(self.reader.readline(), timeout=15)
-                except asyncio.TimeoutError:
-                    print(f"[{addr}] Timeout - no data received")
-                    break
-
-                if not data:
-                    print(f"[{addr}] Disconnected")
-                    break
-
-                try:
-                    packet = json.loads(data.decode())
-
-                    if not self.registered:
-                        await self.handle_registration(packet, addr)
-                    else:
-                        await self.handle_packet(packet)
-
-                except json.JSONDecodeError:
-                    print(f"[{addr}] Invalid JSON received")
-        except ConnectionResetError:
-            print(f"[{addr}] Connection reset by peer")
-        except BrokenPipeError:
-            print(f"[{addr}] Broken pipe")
-        except Exception as e:
-            print(f"[{addr}] Error: {type(e).__name__}: {e}")
-        finally:
-            await self.disconnect()
-
-    async def handle_registration(self, packet, addr):
-        """Handle registration before routing to handlers"""
-        if packet.get("type") == "register":
-            await PacketRouter.handle(self, packet)
-        else:
-            print(f"[{addr}] Packet received before registration, ignoring")
-            await self.send({
-                "type": "error",
-                "message": "Must register first"
-            })
-
-    async def handle_packet(self, packet):
-        """Route registered client packets to handlers"""
-        await PacketRouter.handle(self, packet)
 
     async def send(self, data):
+        """Send JSON packet to server"""
         if not self.is_connected:
             return
 
@@ -72,72 +26,76 @@ class ClientSession:
             payload = json.dumps(data) + "\n"
             self.writer.write(payload.encode())
             await self.writer.drain()
-        except (ConnectionResetError, BrokenPipeError):
-            self.is_connected = False
-            if self.id:
-                await self.manager.remove(self.id)
         except Exception as e:
-            print(f"[{self.writer.get_extra_info('peername')}] Send error: {e}")
+            print(f"[HectaSession] Send error: {e}")
             self.is_connected = False
 
-    async def disconnect(self):
+    async def close(self):
+        """Close TCP connection"""
         self.is_connected = False
-        if self.id:
-            await self.manager.remove(self.id)
-        try:
-            self.writer.close()
-            await self.writer.wait_closed()
-        except Exception as e:
-            print(f"Error closing connection: {e}")
+        if self.writer:
+            try:
+                self.writer.close()
+                await self.writer.wait_closed()
+            except Exception as e:
+                print(f"[HectaSession] Close error: {e}")
 
 
-class HectagonIPCSession:
-    """Represents one local IPC client connection (via UNIX socket)"""
+class TenantSession:
+    """
+    UNIX socket session for one tenant application.
+    Each tenant has unique_id and connects via UNIX socket to HectagonClient.
+    """
 
-    def __init__(self, reader, writer, client_layer):
+    def __init__(self, reader, writer, tenant_id, hectagon_client):
         self.reader = reader
         self.writer = writer
-        self.client_layer = client_layer
+        self.tenant_id = tenant_id
+        self.hectagon_client = hectagon_client
         self.is_connected = True
 
     async def start(self):
-        """Main loop for IPC session"""
+        """Main loop for tenant session"""
+        print(f"[TenantSession] Tenant {self.tenant_id} connected")
+
         try:
             while self.is_connected:
                 try:
                     data = await asyncio.wait_for(self.reader.readline(), timeout=60)
                 except asyncio.TimeoutError:
-                    print("[HectagonIPCSession] Timeout")
+                    print(f"[TenantSession] {self.tenant_id} timeout")
                     break
 
                 if not data:
-                    print("[HectagonIPCSession] Local client disconnected")
+                    print(f"[TenantSession] {self.tenant_id} disconnected")
                     break
 
                 try:
                     packet = json.loads(data.decode())
                     await self.handle_packet(packet)
                 except json.JSONDecodeError:
-                    print("[HectagonIPCSession] Invalid JSON")
+                    print(f"[TenantSession] {self.tenant_id} invalid JSON")
 
         except Exception as e:
-            print(f"[HectagonIPCSession] Error: {e}")
+            print(f"[TenantSession] {self.tenant_id} error: {e}")
         finally:
             await self.disconnect()
 
     async def handle_packet(self, packet):
-        """Handle incoming packet from local app"""
-        packet_id = packet.get("id")
+        """Forward packet to server (or handle locally)"""
+        # Add tenant_id to packet
+        packet["tenant_id"] = self.tenant_id
 
-        # Send to TCP server
-        await self.client_layer.send_to_server(packet)
+        # Send to server via TCP
+        await self.hectagon_client.send_to_server(packet)
 
-        # Store for response routing if it's a request
-        if packet_id:
-            self.client_layer.pending_requests[packet_id] = self
+        # If packet has request_id, store for response routing
+        request_id = packet.get("id")
+        if request_id:
+            self.hectagon_client.pending_requests[request_id] = self
 
     async def send(self, data):
-        """Send JSON packet to local app"""
+        """Send JSON packet to tenant"""
         if not self.is_connected:
             return
 
@@ -146,14 +104,14 @@ class HectagonIPCSession:
             self.writer.write(payload.encode())
             await self.writer.drain()
         except Exception as e:
-            print(f"[HectagonIPCSession] Send error: {e}")
+            print(f"[TenantSession] Send error: {e}")
             self.is_connected = False
 
     async def disconnect(self):
-        """Cleanup IPC session"""
+        """Cleanup tenant session"""
         self.is_connected = False
         try:
             self.writer.close()
             await self.writer.wait_closed()
         except Exception as e:
-            print(f"[HectagonIPCSession] Close error: {e}")
+            print(f"[TenantSession] Close error: {e}")
