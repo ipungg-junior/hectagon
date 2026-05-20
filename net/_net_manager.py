@@ -1,53 +1,43 @@
-"""
-ConnectionManager - Manages tenant sessions at UNIX socket layer
-Maps tenant_id → TenantSession for local UNIX socket connections
-"""
+from extras._utils import debug
 
-
-class ConnectionManager:
-    """
-    Manages all tenant sessions connected via UNIX socket to HectagonClient.
-    One ConnectionManager per HectagonClient daemon.
-    """
+class HectaSessionManager:
 
     def __init__(self):
-        self.tenants = {}  # tenant_id → TenantSession
+        self.sessions = {}
 
-    async def register(self, tenant_id, tenant_session):
-        """Register new tenant"""
-        self.tenants[tenant_id] = tenant_session
-        print(f"[ConnectionManager] Tenant registered: {tenant_id} ({len(self.tenants)} total)")
+    async def register(self, session_id, session):
+        """Register authenticated client"""
+        self.sessions[session_id] = session
+        debug(f"[HectaSessionManager] Registered: {session_id} ({len(self.sessions)} clients)")
 
-    async def remove(self, tenant_id):
-        """Remove tenant on disconnect"""
-        if tenant_id in self.tenants:
-            del self.tenants[tenant_id]
-            print(f"[ConnectionManager] Tenant disconnected: {tenant_id} ({len(self.tenants)} total)")
+    async def remove(self, session_id):
+        """Remove client on disconnect"""
+        if session_id in self.sessions:
+            del self.sessions[session_id]
+            debug(f"[HectaSessionManager] Disconnected: {session_id} ({len(self.sessions)} clients)")
 
-    async def send_to_tenant(self, tenant_id, data):
-        """Send packet to specific tenant"""
-        tenant = self.tenants.get(tenant_id)
-        if tenant:
-            await tenant.send(data)
+    async def send_to_client(self, session_id, data):
+        """Send to specific client"""
+        session = self.sessions.get(session_id)
+        if session:
+            await session.send(data)
 
-    async def broadcast_to_tenants(self, data):
-        """Broadcast packet to all connected tenants"""
-        for tenant in list(self.tenants.values()):
-            await tenant.send(data)
+    async def broadcast(self, data):
+        """Send to all registered clients"""
+        for session in self.sessions.values():
+            await session.send(data)
 
-    def get_tenant(self, tenant_id):
-        """Get tenant session by ID"""
-        return self.tenants.get(tenant_id)
+    def get_client(self, session_id):
+        """Get session by client ID"""
+        return self.sessions.get(session_id)
 
-    def is_tenant_connected(self, tenant_id):
-        """Check if tenant is connected"""
-        return tenant_id in self.tenants
+    def is_registered(self, session_id):
+        """Check if client is registered"""
+        return session_id in self.sessions
 
 
 # Module-level singleton instance
-_manager = ConnectionManager()
-
-
-def get_manager():
-    """Get the global ConnectionManager instance"""
+_manager = HectaSessionManager()
+def get_session_manager():
+    """Get the global HectaSessionManager instance"""
     return _manager
