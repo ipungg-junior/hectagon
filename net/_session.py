@@ -2,6 +2,9 @@ import json
 import asyncio
 from net._router import PacketRouter
 from net._net_manager import get_manager
+from logging_controller import get_logger
+
+logger = get_logger(__name__)
 
 
 class ClientSession:
@@ -16,18 +19,18 @@ class ClientSession:
 
     async def start(self):
         addr = self.writer.get_extra_info("peername")
-        print(f"[ClientSession] New connection from {addr}")
+        logger.info("New connection from %s", addr)
 
         try:
             while self.is_connected:
                 try:
                     data = await asyncio.wait_for(self.reader.readline(), timeout=15)
                 except asyncio.TimeoutError:
-                    print(f"[{addr}] Timeout - no data received")
+                    logger.warning("[%s] Timeout - no data received", addr)
                     break
 
                 if not data:
-                    print(f"[{addr}] Disconnected")
+                    logger.info("[%s] Disconnected", addr)
                     break
 
                 try:
@@ -39,13 +42,13 @@ class ClientSession:
                         await self.handle_packet(packet)
 
                 except json.JSONDecodeError:
-                    print(f"[{addr}] Invalid JSON received")
+                    logger.warning("[%s] Invalid JSON received", addr)
         except ConnectionResetError:
-            print(f"[{addr}] Connection reset by peer")
+            logger.warning("[%s] Connection reset by peer", addr)
         except BrokenPipeError:
-            print(f"[{addr}] Broken pipe")
-        except Exception as e:
-            print(f"[{addr}] Error: {type(e).__name__}: {e}")
+            logger.warning("[%s] Broken pipe", addr)
+        except Exception as exc:
+            logger.exception("[%s] Error: %s", addr, type(exc).__name__)
         finally:
             await self.disconnect()
 
@@ -54,7 +57,7 @@ class ClientSession:
         if packet.get("type") == "register":
             await PacketRouter.handle(self, packet)
         else:
-            print(f"[{addr}] Packet received before registration, ignoring")
+            logger.warning("[%s] Packet received before registration, ignoring", addr)
             await self.send({
                 "type": "error",
                 "message": "Must register first"
@@ -76,8 +79,8 @@ class ClientSession:
             self.is_connected = False
             if self.id:
                 await self.manager.remove(self.id)
-        except Exception as e:
-            print(f"[{self.writer.get_extra_info('peername')}] Send error: {e}")
+        except Exception as exc:
+            logger.exception("[%s] Send error: %s", self.writer.get_extra_info("peername"), exc)
             self.is_connected = False
 
     async def disconnect(self):
@@ -87,5 +90,5 @@ class ClientSession:
         try:
             self.writer.close()
             await self.writer.wait_closed()
-        except Exception as e:
-            print(f"Error closing connection: {e}")
+        except Exception as exc:
+            logger.exception("Error closing connection: %s", exc)
